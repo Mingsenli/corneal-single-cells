@@ -1,0 +1,106 @@
+library(Seurat)
+library(dplyr)
+library(dplyr)
+library(tidyverse)
+library(patchwork)
+library(harmony)
+library(ggsci)
+library(ggplot2)
+library(ggpubr)
+library(stringr)
+library(data.table)
+library(future.apply)
+library(future)
+plan("multicore", workers = 48) ###set the compute core
+options(future.globals.maxSize = 10000 * 1024^2)
+
+
+
+dir = c('PCW10_2/','PCW12_1/', 'PCW12_2/','PCW12_3/','PCW12_4/','PCW13_1/','PCW13_2/',
+        'PCW14_1/','PCW14_2/','PCW16_1/','PCW16_2/','PCW17/','PCW18/','PCW20_2/',
+        'PCW21/','adult_1/', 'adult_2/','adult_3/','adult_4/')
+
+names(dir) = c('PCW10.2','PCW12.1', 'PCW12.2','PCW12.3','PCW12.4','PCW13.1','PCW13.2',
+               'PCW14.1','PCW14.2','PCW16.1','PCW16.2','PCW17','PCW18','PCW20.2',
+               'PCW21','adult.1', 'adult.2','adult.3','adult.4') 
+
+
+counts <- Read10X(data.dir =dir)
+ocular_develop = CreateSeuratObject(counts,min.cells = 50, min.features = 300)
+rm(counts,dir)
+
+
+ocular_develop[["percent.mt"]] <- PercentageFeatureSet(ocular_develop, pattern = "^MT-")
+hist(ocular_develop[["percent.mt"]]$percent.mt) ##线粒体count含量小于20%就可以接受
+
+HB.genes <- c("HBA1","HBA2","HBB","HBD","HBE1","HBG1","HBG2","HBM","HBQ1","HBZ")
+HB_m <- match(HB.genes, rownames(ocular_develop@assays$RNA)) 
+HB.genes <- rownames(ocular_develop@assays$RNA)[HB_m] 
+HB.genes <- HB.genes[!is.na(HB.genes)] 
+ocular_develop[["percent.HB"]]<-PercentageFeatureSet(ocular_develop, features=HB.genes) 
+
+ocular_develop_filter <- subset(ocular_develop, subset = nFeature_RNA > 300 & nFeature_RNA < 8000 & nCount_RNA < 80000
+                                & percent.mt < 15 & percent.HB < 5)
+                                
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="adult.1"),"group"] <- "adult"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="adult.2"),"group"] <- "adult"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="adult.3"),"group"] <- "adult"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="adult.4"),"group"] <- "adult"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW10.2"),"group"] <- "PCW10"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW12.1"),"group"] <- "PCW12"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW12.2"),"group"] <- "PCW12"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW12.3"),"group"] <- "PCW12"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW12.4"),"group"] <- "PCW12"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW13.1"),"group"] <- "PCW13"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW13.2"),"group"] <- "PCW13"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW14.1"),"group"] <- "PCW14"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW14.2"),"group"] <- "PCW14"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW16.1"),"group"] <- "PCW16"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW16.2"),"group"] <- "PCW16"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW17"),"group"] <- "PCW17"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW18"),"group"] <- "PCW18"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW20.2"),"group"] <- "PCW20"
+ocular_develop_filter@meta.data[which(ocular_develop_filter@meta.data$orig.ident =="PCW21"),"group"] <- "PCW21"
+
+
+
+ocular_develop.list <- SplitObject(ocular_develop_filter, split.by = "orig.ident")
+
+
+for (i in 1:length(ocular_develop.list)) {
+  
+ocular_develop.list[[i]] <- SCTransform(ocular_develop.list[[i]], vst.flavor = "v2", verbose = FALSE,variable.features.n = 3000,
+                                        vars.to.regress = c("percent.mt")) }
+
+
+features <- SelectIntegrationFeatures(object.list = ocular_develop.list, nfeatures = 3000)
+ocular_develop.list <- PrepSCTIntegration(object.list = ocular_develop.list, anchor.features = features)
+
+
+ocular_develop.anchor.sct <- FindIntegrationAnchors(object.list = ocular_develop.list, normalization.method = "SCT",
+                                                    reference = c(15,19),
+                                                    anchor.features = features,k.anchor = 5)
+
+
+ocular_develop.anchor.sct <- IntegrateData(anchorset = ocular_develop.anchor.sct, normalization.method = "SCT")%>%
+  RunPCA(verbose = FALSE,npcs=50)
+
+
+ElbowPlot(ocular_develop.anchor.sct,ndims = 40,reduction="pca")
+
+num=1:20
+cornea_epithelium <- ocular_develop.anchor.sct %>%
+  
+  RunUMAP(reduction = "pca", dims = num, verbose = FALSE) %>% 
+  RunTSNE(reduction = "pca", dims = num, verbose = FALSE) %>%
+  FindNeighbors(reduction = "pca", dims = num) %>%
+  FindClusters(resolution = 1.5,verbose = FALSE)
+
+DefaultAssay(ocular_develop.anchor.sct.final) <- "RNA"
+ocular_develop.anchor.sct.final <- NormalizeData(ocular_develop.anchor.sct.final, normalization.method = "LogNormalize", scale.factor = 10000)
+
+DefaultAssay(ocular_develop.anchor.sct.final) <- "SCT"
+
+saveRDS(ocular_develop.anchor.sct.final,file="./ocular_develop.anchor.sct.final.rds")
+
+

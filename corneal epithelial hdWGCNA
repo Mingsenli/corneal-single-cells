@@ -1,0 +1,361 @@
+library(WGCNA)
+library(hdWGCNA)
+library(Seurat) 
+library(Matrix) 
+library(tidyverse) 
+library(igraph)
+library(cowplot)
+library(patchwork)
+theme_set(theme_cowplot())
+set.seed(12345)
+
+library(Seurat)
+library(dplyr)
+library(future)
+library(future.apply)
+library(dplyr)
+library(tidyverse)
+library(patchwork)
+library(harmony)
+library(ggsci)
+library(ggplot2)
+library(ggpubr)
+library(stringr)
+library(data.table)
+plan("multicore", workers = 48) ###set the compute core
+options(future.globals.maxSize = 10000 * 1024^2)
+
+
+cornea_epithelium <- readRDS("./cornea_limbus_epithelium.rds")
+
+
+cornea_epithelium <- SCTransform(cornea_epithelium, 
+                                 variable.features.n = 2000,
+                                 vst.flavor = "v2", 
+                                 vars.to.regress = c("percent.mt"))
+
+
+
+DefaultAssay( cornea_epithelium) <- "SCT"
+
+# only supply features that were used for SCTransform!!!
+cornea_epithelium <- SetupForWGCNA(
+  cornea_epithelium,
+  features = VariableFeatures(cornea_epithelium),
+  wgcna_name = "cornea_epithelium_SCT"
+)
+
+
+
+cornea_epithelium <- MetacellsByGroups(
+  seurat_obj =  cornea_epithelium,
+  #group.by = c("leiden_anno"),#,"group"),
+  group.by = c("leiden_anno","orig.ident"),
+  k = 25,
+  max_shared=20,
+  min_cells = 300,
+  #reduction = 'pca',
+  reduction = 'umap',
+  ident.group = 'leiden_anno',
+  slot = 'data',
+  assay = 'SCT' 
+)
+
+Idents( cornea_epithelium) = "leiden_anno"
+#Idents( cornea_epithelium) = "celltime"
+# set expression matrix for hdWGCNA
+cornea_epithelium <- SetDatExpr(cornea_epithelium,assay = "SCT",slot = "data")
+
+
+# Test different soft powers:
+cornea_epithelium <- TestSoftPowers(
+  cornea_epithelium,
+  networkType = 'signed' # you can also use "unsigned" or "signed hybrid"
+)
+
+# plot the results:
+plot <- PlotSoftPowers( cornea_epithelium)
+
+# assemble with patchwork
+wrap_plots(plot, ncol=2)
+
+
+
+
+cornea_epithelium <- ConstructNetwork(
+  cornea_epithelium,
+  soft_power = 8,
+  tom_name = " cornea_epithelium_SCT_data",
+  overwrite_tom = TRUE
+)
+
+
+#TOM <- GetTOM( cornea_epithelium)
+
+
+
+# compute module eigengenes and connectivity
+cornea_epithelium <- ModuleEigengenes(cornea_epithelium)
+cornea_epithelium <- ModuleConnectivity( cornea_epithelium)
+
+
+# rename the modules
+cornea_epithelium <- ResetModuleNames(
+  cornea_epithelium,
+  new_name = "M"
+)
+
+
+###########################
+# get the module table
+modules <- GetModules( cornea_epithelium)
+mods <- unique(modules$module)
+
+# make a table of the module-color pairings
+mod_colors_df <- dplyr::select(modules, c(module, color)) %>%
+  distinct %>% arrange(module)
+rownames(mod_colors_df) <- mod_colors_df$module
+
+# print the dataframe
+mod_colors_df
+
+# load MetBrewer color scheme pakckage
+library(MetBrewer)
+
+# get a table of just the module and it's unique color
+mod_color_df <- GetModules( cornea_epithelium) %>%
+  dplyr::select(c(module, color)) %>%
+  distinct %>% arrange(module)
+
+# the number of unique modules (subtract 1 because the grey module stays grey):
+n_mods <- nrow(mod_color_df) - 1
+
+# using the "Signac" palette from metbrewer, selecting for the number of modules
+new_colors <- paste0(met.brewer("Signac", n=n_mods))
+
+# reset the module colors
+cornea_epithelium <- ResetModuleColors( cornea_epithelium, new_colors)
+
+
+
+
+
+# plot the dendrogram
+
+pdf(" cornea_epithelium_PlotDendrogram_final.pdf", width = 8, height = 6)
+
+
+PlotDendrogram( cornea_epithelium, main='hdWGCNA SCT Dendrogram')
+
+dev.off()
+
+# plot genes ranked by kME for each module
+p <- PlotKMEs( cornea_epithelium, ncol=5)
+
+p
+
+ggsave(" cornea_epithelium_PlotKMEs_final.pdf",p,width=12,height=5)
+
+
+# compute gene scoring for the top 25 hub genes by kME for each module
+# with Seurat method
+cornea_epithelium <- ModuleExprScore(
+  cornea_epithelium,
+  n_genes = 25,
+  method='Seurat'
+)
+
+# compute gene scoring for the top 25 hub genes by kME for each module
+# with UCell method
+
+#devtools::install_local("/data/User/limingsen/data/software/UCell-1.3.zip")
+
+library(UCell)
+cornea_epithelium <- ModuleExprScore(
+  cornea_epithelium,
+  n_genes = 25,
+  method='UCell'
+)
+
+
+# make a featureplot of hMEs for each module
+
+
+plot_list <- ModuleFeaturePlot(
+  cornea_epithelium,
+  reduction = "scanpy_umap",
+  features='hMEs', # plot the hMEs
+  order=TRUE # order so the points with highest hMEs are on top
+)
+
+# stitch together with patchwork
+pdf(" cornea_epithelium_ModuleFeaturePlot_hMEs.pdf",width=10,height=4)
+
+wrap_plots(plot_list, ncol=3)
+
+dev.off()
+
+
+
+
+plot_score <- ModuleFeaturePlot(
+  cornea_epithelium,
+  reduction = "scanpy_umap",
+  features='scores', # plot the hMEs
+  order=TRUE # order so the points with highest hMEs are on top
+)
+
+
+pdf(" cornea_epithelium_ModuleFeaturePlot_score.pdf",width=10,height=4)
+
+wrap_plots(plot_score, ncol=3)
+
+dev.off()
+
+# plot module correlagram
+pdf("cornea_epithelium_ModuleCorrelogram_final.pdf",width=8,height=6)
+
+ModuleCorrelogram( cornea_epithelium)
+
+dev.off()
+# get hMEs from seurat object
+MEs <- GetMEs( cornea_epithelium, harmonized=TRUE)
+mods <- colnames(MEs); mods <- mods[mods != 'grey']
+
+# add hMEs to Seurat meta-data:
+cornea_epithelium@meta.data <- cbind( cornea_epithelium@meta.data, MEs)
+
+
+# plot with Seurat's DotPlot function
+p <- DotPlot( cornea_epithelium, features=mods, group.by = 'leiden_anno')
+p <- DotPlot( cornea_epithelium, features=mods, group.by = 'celltime')
+
+# flip the x/y axes, rotate the axis labels, and change color scheme:
+p <- p +
+  coord_flip() +
+  RotatedAxis() +
+  scale_color_gradient2(high='red', mid='grey95', low='blue')
+
+# plot output
+p
+
+ggsave("cornea_DotPlot.pdf",p,width=8,height=6)
+
+
+# Plot INH-M4 hME using Seurat VlnPlot function
+p <- VlnPlot(
+  cornea_epithelium,
+  features = 'M1',
+  group.by = 'leiden_anno',
+  pt.size = 0 # don't show actual data points
+)
+
+# add box-and-whisker plots on top:
+p <- p + geom_boxplot(width=.25, fill='white')
+
+# change axis labels and remove legend:
+p <- p + xlab('') + ylab('hME') + NoLegend()
+
+# plot output
+p
+
+
+
+ModuleNetworkPlot(cornea_epithelium,outdir = "cornea_epithelium_ModuleNetworks_final")
+
+# hubgene network
+
+pdf("cornea HubGeneNetworkPlot.pdf",width=15,height=10)
+
+HubGeneNetworkPlot(
+  cornea_epithelium,
+  n_hubs = 10, n_other=5,
+  edge_prop = 0.75,
+  mods = 'all'
+)
+
+dev.off()
+
+
+
+cornea_epithelium <- RunModuleUMAP(
+  cornea_epithelium,
+  n_hubs = 10, # number of hub genes to include for the UMAP embedding 
+  n_neighbors=10, # neighbors parameter for UMAP
+  min_dist=0.1 # min distance between points in UMAP space
+  #supervised=TRUE,target_weight=0.5 
+  
+)
+
+
+
+
+# get the hub gene UMAP table from the seurat object
+umap_df <- GetModuleUMAP( cornea_epithelium)
+
+# plot with ggplot
+ggplot(umap_df, aes(x=UMAP1, y=UMAP2)) +
+  geom_point(
+    color=umap_df$color, # color each point by WGCNA module
+    size=umap_df$kME*2 # size of each point based on intramodular connectivity
+  ) +
+  umap_theme()
+
+pdf(" cornea_epithelium_ModuleUMAPPlot_fianl.pdf",width=8,height=8)
+
+ModuleUMAPPlot(
+  cornea_epithelium,
+  edge.alpha=0.25,
+  sample_edges=TRUE,
+  edge_prop=0.2, # proportion of edges to sample (20% here)
+  label_hubs=5 ,# how many hub genes to plot per module?
+  keep_grey_edges=FALSE
+  
+)
+
+dev.off()
+
+
+
+library(enrichR)
+# enrichr databases to test
+dbs <- c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021')
+
+# perform enrichment tests
+cornea_epithelium <- RunEnrichr(
+  cornea_epithelium,
+  dbs=dbs, # character vector of enrichr databases to test
+  max_genes = 100 # number of genes per module to test
+)
+
+# retrieve the output table
+enrich_df <- GetEnrichrTable( cornea_epithelium)
+
+
+write.csv(enrich_df,"./cornea epithelium enrich_GO.csv")
+
+
+
+# make GO term plots:
+
+EnrichrBarPlot(
+  cornea_epithelium,
+  outdir = "enrichr_plots", # name of output directory
+  n_terms = 10, # number of enriched terms to show (sometimes more show if there are ties!!!)
+  plot_size = c(5,7), # width, height of the output .pdfs
+  logscale=TRUE # do you want to show the enrichment as a log scale?
+)
+
+
+# enrichr dotplot
+
+pdf(" cornea_epithelium_module_GO.pdf",width = 8,height = 8)
+EnrichrDotPlot(
+  cornea_epithelium,
+  #mods = "all",#c("M1","M10","M3","M5","M4","M6"), # use all modules (this is the default behavior)
+  mods = c("M2","M5","M6","M3","M1","M4"),
+  database = "GO_Biological_Process_2021", # this has to be one of the lists we used above!!!
+  n_terms=5 # number of terms for each module
+)
+
+dev.off()

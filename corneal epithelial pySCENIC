@@ -1,0 +1,89 @@
+library(Seurat)
+library(dplyr)
+library(tidyverse)
+library(patchwork)
+library(SCENIC)
+library(future)
+library(future.apply)
+
+cornea_epithelium <- readRDS("./cornea_limbus_epithelium.rds")
+cornea_epithelium.matrix <- as.matrix(cornea_epithelium@assays$RNA@data)
+
+mydbDIR <- "./cisTarget_databases/"
+mydbs <- c( "hg38__refseq-r80__10kb_up_and_down_tss.mc9nr.feather",
+            "hg38__refseq-r80__500bp_up_and_100bp_down_tss.mc9nr.feather")
+names(mydbs) <- c("10kb","500bp")
+
+scenicOptions <- initializeScenic(org="hgnc", 
+                                  nCores=48,
+                                  dbDir=mydbDIR, 
+                                  dbs = mydbs,
+                                  datasetTitle = "cornea_epithelium.matrix")
+
+saveRDS(scenicOptions, "cornea_epithelium_data_scenicOptions.rds")
+
+scenicOptions=readRDS("cornea_epithelium_data_scenicOptions.rds")
+
+genesKept <- geneFiltering(cornea_epithelium.matrix, scenicOptions, 
+                           minCountsPerGene = 30, 
+                           minSamples = 50)
+genesKept[1:20]
+
+cornea_epithelium_filtered <- t(cornea_epithelium.matrix[genesKept, ])
+write.csv(cornea_epithelium_filtered,file = "cornea_epithelium_filtered_data.csv")
+
+
+## in python
+import os, sys
+os.getcwd()
+os.listdir(os.getcwd()) 
+
+import loompy as lp;
+import numpy as np;
+import scanpy as sc;
+x=sc.read_csv("cornea_epithelium_filtered_data.csv");
+row_attrs = {"Gene": np.array(x.var_names),};
+col_attrs = {"CellID": np.array(x.obs_names)};
+lp.create("cornea_epithelium_filtered_data.loom",x.X.transpose(),row_attrs,col_attrs);
+
+
+cornea_epithelium_all.matrix <- t(as.matrix(cornea_epithelium@assays$RNA@data))
+write.csv(cornea_epithelium_all.matrix,file = "cornea_epithelium_all_data.csv")
+
+import os, sys
+os.getcwd()
+os.listdir(os.getcwd()) 
+
+import loompy as lp;
+import numpy as np;
+import scanpy as sc;
+x=sc.read_csv("cornea_epithelium_all_data.csv");
+row_attrs = {"Gene": np.array(x.var_names),};
+col_attrs = {"CellID": np.array(x.obs_names)};
+lp.create("cornea_epithelium_all_data.loom",x.X.transpose(),row_attrs,col_attrs);
+
+
+
+srun -c 20 pyscenic grn \
+--num_workers 20 -m grnboost2 \
+-o cornea_epithelium.loom.grn.output.tsv \
+--seed 123 \
+cornea_epithelium_filtered_data.loom \
+/data/User/limingsen/data/RNA/singlecell/cisTarget_databases/human_all_TF.txt
+
+srun -c 20 pyscenic ctx \
+cornea_epithelium.loom_data.grn.output.tsv \
+/data/User/limingsen/data/RNA/singlecell/cisTarget_databases/hg38__refseq-r80__10kb_up_and_down_tss.mc9nr.genes_vs_motifs.rankings.feather \
+/data/User/limingsen/data/RNA/singlecell/cisTarget_databases/hg38__refseq-r80__500bp_up_and_100bp_down_tss.mc9nr.genes_vs_motifs.rankings.feather \
+--annotations_fname /data/User/limingsen/data/RNA/singlecell/cisTarget_databases/motifs-v9nr_clust-nr.hgnc-m0.001-o0.0.tbl \
+--expression_mtx_fname cornea_epithelium_filtered_data.loom \
+--output cornea_epithelium.loom_data.regulons.csv \
+--num_workers 20 \
+--mask_dropouts
+
+srun -c 20 pyscenic aucell \
+cornea_epithelium_all_data.loom \
+cornea_epithelium.loom_data.regulons.csv \
+-o cornea_epithelium.AUC_data.loom \
+--num_workers 20 \
+--seed 123
